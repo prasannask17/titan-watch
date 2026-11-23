@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AR Watch Try-On (DeepAR)</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #fff; font: 15px system-ui, sans-serif; }
+    #preview { position: fixed; inset: 0; }
+    #hud {
+      position: fixed; left: 12px; top: 10px; z-index: 5; color: #0f0; font-weight: 600;
+      text-shadow: 0 1px 2px #000; line-height: 1.5; pointer-events: none; white-space: pre-line;
+    }
+    #msg {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; max-width: 560px;
+      text-align: center; background: rgba(0,0,0,.7); padding: 16px 20px; border-radius: 10px; display: none;
+    }
+    video#testVideo { display: none; }
+  </style>
+</head>
+<body>
+  <div id="preview"></div>
+  <div id="hud">Loading DeepAR...</div>
+  <div id="msg"></div>
+  <video id="testVideo" playsinline muted loop></video>
+
+  <script type="module">
+    // DeepAR watch try-on: the same wrist tracking ShopAR uses ("enableWristTracking" + "wristInit").
+    //
+    //   deepar_tryon.html                          -> live camera
+    //   deepar_tryon.html?video=camera_test_h264.mp4 -> recorded clip instead of the camera
+    //   deepar_tryon.html?key=YOUR_LICENSE_KEY     -> license key (saved for next time)
+    //
+    // Keys: w = next watch, t = toggle ticking hands, q = stop.
+    import * as deepar from "https://cdn.jsdelivr.net/npm/deepar@5.6.22/js/deepar.esm.js";
+
+    // Watch effects made in DeepAR Studio (steps in DEEPAR_SETUP.md). Put the exported files in ./effects/.
+    // effects/deepar_official_watch.deepar is DeepAR's own demo watch (from try.deepar.ai/wrist/watch):
+    // fine for testing on your machine; ask DeepAR before using it in a public product.
+    // The effects made with Studio's one-click "Create Watch Try-on" drew nothing, so they are not listed;
+    // add your own here once it is built by hand in Studio (see DEEPAR_SETUP.md).
+    const EFFECTS = [
+      { name: "DeepAR watch (official demo)", file: "effects/deepar_official_watch.deepar" },
+      { name: "My watch (black)", file: "effects/my_watch.deepar" },
+    ];
+
+    const hud = document.getElementById("hud");
+    const msg = document.getElementById("msg");
+    const params = new URLSearchParams(location.search);
+
+    // License key: optional on localhost (DeepAR then shows a watermark), required on a real domain.
+    if (params.get("key")) {
+      try { localStorage.setItem("deeparKey", params.get("key")); } catch {}
+    }
+    let licenseKey = params.get("key") || "";
+    try { licenseKey = licenseKey || localStorage.getItem("deeparKey") || ""; } catch {}
+    // Free DeepAR key for the Web App "prasannask17.github.io" (project Titan_watch on developer.deepar.ai).
+    // DeepAR keys are tied to a domain, so it is only used there; on localhost a placeholder works.
+    const SITE_KEYS = {
+      "prasannask17.github.io": "9c0a46e83878bc728caab18b95337493788b8322d592e05266ef14964ba877643ff539dc0ed83d75",
+    };
+    if (!licenseKey) licenseKey = SITE_KEYS[location.hostname] || "localhost-testing";
+
+    function showMessage(html) {
+      msg.innerHTML = html;
+      msg.style.display = html ? "block" : "none";
+    }
+
+    // Only list effects whose files exist, so a missing one gives a clear message instead of an error.
+    async function availableEffects() {
+      // ?effect=path/to/file.deepar loads just that effect (for testing).
+      if (params.get("effect")) return [{ name: params.get("effect").split("/").pop(), file: params.get("effect") }];
+      const found = [];
+      for (const e of EFFECTS) {
+        try {
+          const r = await fetch(e.file, { method: "HEAD", cache: "no-store" });
+          if (r.ok) found.push(e);
+        } catch {}
+      }
+      // Online (e.g. GitHub Pages) the effects folder isn't published: load DeepAR's demo watch from
+      // DeepAR's own server instead of re-hosting their file.
+      if (!found.length) found.push({ name: "DeepAR watch (official demo)", file: "https://demo.deepar.ai/assets/wrist/watch/watch.deepar" });
+      return found;
+    }
+
+    let deepAR = null;
+    let effects = [];
+    let current = 0;
+    let wrist = { detected: false, isLeft: false };
+    let ticking = true;
+
+    function drawHud() {
+      const e = effects[current];
+      hud.textContent =
+        `DeepAR wrist tracking  |  [w] next watch  [t] ticking  [q] stop\n` +
+        (e ? `Watch: ${e.name}\n` : "Watch: none loaded\n") +
+        (wrist.detected ? `Wrist detected (${wrist.isLeft ? "left" : "right"} hand)` : "Show your wrist to the camera");
+    }
+
+    async function loadEffect(i) {
+      current = i;
+      const e = effects[i];
+      drawHud();
+      await deepAR.switchEffect(e.file);
+      try { deepAR.setWatchTicking(ticking); } catch {}
+    }
+
+    async function start() {
+      effects = await availableEffects();
+
+      const options = {
+        licenseKey,
+        previewElement: document.getElementById("preview"),
+        additionalOptions: {
+          // Start the wrist tracker straight away, like ShopAR does for watches.
+          hint: ["wristInit", "enableWristTracking"],
+          cameraConfig: { facingMode: "user" },
+        },
+      };
+      if (params.get("video")) options.additionalOptions.cameraConfig = { disableDefaultCamera: true };
+      if (effects.length) options.effect = effects[0].file;
+
+      deepAR = await deepar.initialize(options);
+      window.__deepAR = deepAR; // debug handle
+
+      deepAR.callbacks.onWristTracked = (data) => {
+        if (data.detected !== wrist.detected || data.isLeft !== wrist.isLeft) {
+          wrist = { detected: data.detected, isLeft: data.isLeft };
+          drawHud();
+        }
+      };
+
+      if (params.get("video")) {
+        const v = document.getElementById("testVideo");
+        v.src = params.get("video");
+        await v.play();
+        deepAR.setVideoElement(v, true); // true = mirror, like a selfie camera
+      }
+
+      if (!effects.length) {
+        showMessage(
+          "DeepAR is running, but there is no watch effect yet.<br><br>" +
+          "Make <b>effects/my_watch.deepar</b> in DeepAR Studio (steps in <b>DEEPAR_SETUP.md</b>), " +
+          "then reload this page."
+        );
+      } else {
+        try { deepAR.setWatchTicking(true); } catch {}
+      }
+      drawHud();
+    }
+
+    document.addEventListener("keydown", async (ev) => {
+      if (!deepAR) return;
+      if (ev.key === "w" && effects.length > 1) await loadEffect((current + 1) % effects.length);
+      if (ev.key === "t") {
+        ticking = !ticking;
+        try { deepAR.setWatchTicking(ticking); } catch {}
+      }
+      if (ev.key === "q") {
+        deepAR.shutdown();
+        hud.textContent = "Stopped.";
+      }
+    });
+
+    start().catch((err) => {
+      console.error(err);
+      showMessage(`DeepAR failed to start:<br><code>${String(err.message || err)}</code>`);
+    });
+  </script>
+</body>
+</html>
